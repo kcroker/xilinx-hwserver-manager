@@ -1,0 +1,12 @@
+Package: xilinx-hwserver-manager
+Version: 1.0-1
+Section: misc
+Priority: optional
+Architecture: any
+Depends: python3, udev, grep
+Maintainer: Kevin Croker <kcroker@phys.hawaii.edu>
+Description: Spawns and kills dedicated Xilinx hw_server instances at consistent ports for distinct JTAG cables.
+ Useful for debugging testbenches shared by multiple users.
+ Currently works only with Vivado, because it uses xsdb.
+
+
