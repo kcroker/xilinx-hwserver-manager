@@ -2,7 +2,6 @@
 
 import os
 import sys
-import time
 import subprocess
 import signal
 import syslog
@@ -31,8 +30,6 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
         
         # Otherwise parse
         try:
-            #print(directives)
-
             if directives[0] == '#':
                 pass
             elif directives[0] == 'address':
@@ -42,7 +39,9 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
             elif directives[0] == 'base_port':
                 base_port = directives[1]
             elif directives[0] == 'cable_lease':
-                cable_leases[directives[1]] = directives[2:]
+                # Reassemble a single string from all the split human readable 
+                cable_leases[directives[1]] = (directives[2], (" ".join(directives[3:])))
+
         except IndexError as e:
             syslog.syslog(syslog.LOG_WARNING, "Line %d of configuration file could not be parsed, ignoring" % N)
 
@@ -65,14 +64,18 @@ server = subprocess.Popen(["exec %s/hw_server" % vivado_path, "-s 127.0.0.1", "-
 
 os.system('echo "connect -host 127.0.0.1\nset logfile [open \"/tmp/hw_targets.tmp\" \"w\"]\nputs \$logfile [jtag targets]\nclose \$logfile\n" | %s/xsdb -quiet' % vivado_path)
 os.system('grep -i "Digilent" /tmp/hw_targets.tmp > /tmp/hw_targets')
+os.system("rm /tmp/hw_targets.tmp")
 
-# Kill all the spawned shit
+# Kill all the stuff that just got spawned
 os.killpg(os.getpgid(server.pid), signal.SIGTERM)
 
-# Get em
+# Get whats currently recognized by vivado
 actual_targets = []
 for l in open('/tmp/hw_targets'):
     actual_targets.append(l.split()[3])
+
+# Clean up the last temp file
+os.system("rm /tmp/hw_targets")
 
 # Get a list of current hw_server cable ID's
 instances = None
@@ -83,21 +86,11 @@ try:
     # Make it into a newline delimited list
     instances = instances.strip().split("\n")
 except subprocess.CalledProcessError:
-    # We don't care about the return value
     instances = []
-
-#print(instances)
 
 serviced_targets = []
 for instance in instances:
-    #print(instance)
     serviced_targets.append(instance.split()[1])
-
-#print("Serviced")
-#print(serviced_targets)
-
-#print("actual")
-#print(actual_targets)
 
 # Iterate through the instances and prune unnecessary ones
 for target in serviced_targets:
@@ -110,8 +103,6 @@ for target in serviced_targets:
 for target in actual_targets:
     if not target in serviced_targets:
 
-        # print("we concluded that %s was not in serviced_targets" % target)
-        
         # Spawn one
         # First, check to see if its in the /etc/xilinx_hotplug.conf
         port = None
@@ -128,6 +119,7 @@ for target in actual_targets:
             
             # It was not known, so add it
             with open("/etc/xilinx_hotplug.conf", "a") as f:
+                print("Derping")
                 print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
                 syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
                 cable_leases[target] = [port, name]

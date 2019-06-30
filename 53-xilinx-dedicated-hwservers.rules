@@ -1,0 +1,3 @@
+# Add rules to run the server spawner/killer depending on hotplug
+ACTION=="add", ATTR{idVendor}=="0403", ATTR{manufacturer}=="Xilinx", RUN+="/usr/sbin/xilinx_hotplug.py"
+ACTION=="remove", ATTR{idVendor}=="0403", ATTR{manufacturer}=="Xilinx", RUN+="/usr/sbin/xilinx_hotplug.py"
