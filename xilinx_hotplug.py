@@ -13,6 +13,17 @@ import syslog
 #  3) If a cable is glitchy (power or bad cable or something), it won't
 #     interfere with other people's hw_server experience
 
+def clearLock(flock):
+    os.system("rm %s" % flock)
+  
+# Make sure we're not already trying to service this thing
+lock = "/tmp/%s" % os.environ['ID_SERIAL_SHORT']
+if os.path.exists(lock):
+    exit(0)
+else:
+    # Create the lock
+    open(lock, 'w').close()
+    
 # Some default values
 address = "127.0.0.1"
 base_port = 35000
@@ -48,8 +59,12 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
     # Bail if we don't know where to find the hw_server executable
     if vivado_path is None:
         syslog.syslog(syslog.LOG_ERR, "Vivado path not specified, quitting")
+        clearLock(lock)
         exit(1)
-        
+
+# Syslog debug output
+# syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
+
 # Start an hw_server to get the available cables.
 # Notice we have to setgid because Xilinx commands are all shell wrappers which make architecture-dependent decisions
 # So we get shit spawning shit, and its hard to reliably kill it all
@@ -78,54 +93,66 @@ for l in open('/tmp/hw_targets'):
 os.system("rm /tmp/hw_targets")
 
 # Get a list of current hw_server cable ID's
-instances = None
+serviced_targets = []
 try:
     instances = subprocess.check_output("ps aux | grep 'hw_server' | egrep -o 'filter [0-9A-F]+'", shell=True)
     instances = instances.decode("utf-8")
 
     # Make it into a newline delimited list
     instances = instances.strip().split("\n")
+
+    # Remove the filter part
+    serviced_targets = [instance.split()[1] for instance in instances]
+    
+    # Log to syslog
+    #syslog.syslog(syslog.LOG_DEBUG, "Current cables seviced: %s" % serviced_targets)
+    
 except subprocess.CalledProcessError:
-    instances = []
+    pass
 
-serviced_targets = []
-for instance in instances:
-    serviced_targets.append(instance.split()[1])
+if sys.argv[1] == "--remove":
+    # syslog.syslog(syslog.LOG_DEBUG, "Called to remove...")
 
-# Iterate through the instances and prune unnecessary ones
-for target in serviced_targets:
-    if not target in actual_targets:
-        # Kill it
-        os.system("pkill -f 'filter %s'" % target)
-        syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % target)
-        
-# Iterate through the targets and spawn new ones
-for target in actual_targets:
-    if not target in serviced_targets:
+    # Iterate through the instances and prune unnecessary ones
+    for target in serviced_targets:
+        if not target in actual_targets:
+            # Kill it
+            os.system("pkill -f 'filter %s'" % target)
+            syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % cable_leases[target][1])
+    
+if sys.argv[1] == "--add":
+    
+    # Iterate through the targets and spawn new ones
+    for target in actual_targets:
+        if not target in serviced_targets:
 
-        # Spawn one
-        # First, check to see if its in the /etc/xilinx_hotplug.conf
-        port = None
-        name = None
-        if target in cable_leases:
-
-            # Fetch the lease
-            lease = cable_leases[target]
-            port = int(lease[0])
-            name = lease[1]
-        else:
-            port = base_port + len(cable_leases)
-            name = target
-            
-            # It was not known, so add it
-            with open("/etc/xilinx_hotplug.conf", "a") as f:
-                print("Derping")
-                print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
-                syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
-                cable_leases[target] = [port, name]
+            # Spawn one
+            # First, check to see if its in the /etc/xilinx_hotplug.conf
+            port = None
+            name = None
+            if target in cable_leases:
                 
-        # And spawn
-        os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
+                syslog.syslog("Found a lease for %s" % target)
+            
+                # Fetch the lease
+                lease = cable_leases[target]
+                port = int(lease[0])
+                name = lease[1]
+            else:
+                port = base_port + len(cable_leases)
+                name = target
+                
+                # It was not known, so add it
+                with open("/etc/xilinx_hotplug.conf", "a") as f:
+                    print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
+                    syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
+                    cable_leases[target] = [port, name]
+                    
+            # And spawn
+            os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
+        
+            # Log human readable to syslog
+            syslog.syslog("Spawned hw_server for JTAG device %s, listening at %s:%s" % (name, address, port))
 
-        # Log human readable to syslog
-        syslog.syslog("JTAG device %s serviced by dedicated hw_server at %s:%s" % (name, address, port))
+# Clear the lock
+clearLock(lock)
