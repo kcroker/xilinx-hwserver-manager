@@ -20,10 +20,20 @@ def clearLock(flock):
     except OSError as e:
         syslog.syslog("Failed to release lock %s: %s" % (flock, e))
 
-# Locking m1ust be done with mkdir, since it is atomic
+#
+# Now that we know ID_SERIAL_SHORT is the udev ennvironment variable for the target
+# we can just work with THAT specific target... this is much easier than seeing who is around
+# and iterating through everyone
+#
+# Since writes are append, and line buffered, many processes can write at the config at once.
+# So if we only use the ID_SERIAL_SHORT target, then this all works fast and clean.
+#
+# Make sure that even if badly crafted udev rules fire more than once on the same
+# device, we only process the cable once
+#
+# Locking must be done with mkdir, since it is atomic
 # Beautiful from here: https://wiki.bash-hackers.org/howto/mutex
-# (I'm sure Python has some way to do mutexes, but its nice to know how to
-#  handle it at the POSIX portable level, even though this is not a bash script)
+#
 lock = "/tmp/%s" % os.environ['ID_SERIAL_SHORT']
 try:
     # subprocess.check_output("mkdir %s" % lock, shell=True)
@@ -75,38 +85,7 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
         exit(1)
 
 # Syslog debug output
-syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
-
-# Start an hw_server to get the available cables.
-# Notice we have to setgid because Xilinx commands are all shell wrappers which make architecture-dependent decisions
-# So we get shit spawning shit, and its hard to reliably kill it all
-#
-# We have to exec(), so we inherit the foreground process (no -d), change its group, and then kill the entire group.
-# Ugh.
-try:
-    server = subprocess.Popen(["exec %s/hw_server" % vivado_path, "-s 127.0.0.1", "-q"],
-                              preexec_fn=os.setpgrp,
-                              shell=True,
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
-except Exception as e:
-    syslog.syslog("Could not determine serviced cables: %s" % e)
-    exit(0)
-
-os.system('echo "connect -host 127.0.0.1\nset logfile [open \"%s/hw_targets.tmp\" \"w\"]\nputs \$logfile [jtag targets]\nclose \$logfile\n" | %s/xsdb -quiet' % (lock, vivado_path))
-os.system('grep -i "Digilent" %s/hw_targets.tmp > %s/hw_targets' % (lock, lock))
-os.system("rm %s/hw_targets.tmp" % lock)
-
-# Kill all the stuff that just got spawned
-os.killpg(os.getpgid(server.pid), signal.SIGTERM)
-
-# Get whats currently recognized by vivado
-actual_targets = []
-for l in open("%s/hw_targets" % lock):
-    actual_targets.append(l.split()[3])
-
-# Clean up the last temp file
-os.system("rm %s/hw_targets" % lock)
+# syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
 
 # Get a list of current hw_server cable ID's
 serviced_targets = []
@@ -126,49 +105,45 @@ try:
 except subprocess.CalledProcessError:
     pass
 
+# Define the target directly from udev
+target = os.environ['ID_SERIAL_SHORT']
+
 if sys.argv[1] == "--remove":
-    # syslog.syslog(syslog.LOG_DEBUG, "Called to remove...")
-
     # Iterate through the instances and prune unnecessary ones
-    for target in serviced_targets:
-        if not target in actual_targets:
-            # Kill it
-            os.system("pkill -f 'filter %s'" % target)
-            syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % cable_leases[target][1])
+    if target in serviced_targets:
+        os.system("pkill -f 'filter %s'" % target)
+        syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % cable_leases[target][1])
     
-if sys.argv[1] == "--add":
-    
-    # Iterate through the targets and spawn new ones
-    for target in actual_targets:
-        if not target in serviced_targets:
+if sys.argv[1] == "--add":   
+    if not target in serviced_targets:
 
-            # Spawn one
-            # First, check to see if its in the /etc/xilinx_hotplug.conf
-            port = None
-            name = None
-            if target in cable_leases:
+        # Spawn one
+        # First, check to see if its in the /etc/xilinx_hotplug.conf
+        port = None
+        name = None
+        if target in cable_leases:
                 
-                syslog.syslog("Found a lease for %s" % target)
+            syslog.syslog("Found a lease for %s" % target)
             
-                # Fetch the lease
-                lease = cable_leases[target]
-                port = int(lease[0])
-                name = lease[1]
-            else:
-                port = base_port + len(cable_leases)
-                name = target
+            # Fetch the lease
+            lease = cable_leases[target]
+            port = int(lease[0])
+            name = lease[1]
+        else:
+            port = base_port + len(cable_leases)
+            name = target
                 
-                # It was not known, so add it
-                with open("/etc/xilinx_hotplug.conf", "a") as f:
-                    print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
-                    syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
-                    cable_leases[target] = [port, name]
-                    
-            # And spawn
-            os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
+            # It was not known, so add it
+            with open("/etc/xilinx_hotplug.conf", "a") as f:
+                print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
+                syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
+                cable_leases[target] = [port, name]
+
+        # And spawn
+        os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
         
-            # Log human readable to syslog
-            syslog.syslog("Spawned hw_server for JTAG device %s, listening at %s:%s" % (name, address, port))
+        # Log human readable to syslog
+        syslog.syslog("Spawned hw_server for JTAG device %s, listening at %s:%s" % (name, address, port))
 
 # Clear the lock
 clearLock(lock)
