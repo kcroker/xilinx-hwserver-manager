@@ -5,7 +5,7 @@
 # It will get run a few times on some cables, depending on how many serial lines they provide
 # Also, the driver tends to make a serial line and then tear it down
 # So only run once per cable by checking the environment within the hotplugger itself
-ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", RUN+="/usr/sbin/xilinx_hotplug.py --add"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0403", RUN+="/usr/sbin/xilinx_hotplug.py --add"
 
 # Removal must match on ENV, since the device tree is no longer around for matching??
 # This one works well.  Lets match on the usb subsystem too.

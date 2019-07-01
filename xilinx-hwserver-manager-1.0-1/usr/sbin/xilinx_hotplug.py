@@ -5,6 +5,7 @@ import sys
 import subprocess
 import signal
 import syslog
+import fcntl
 
 # This way:
 #  1) To debug a cable, just chose a specific port
@@ -13,54 +14,40 @@ import syslog
 #  3) If a cable is glitchy (power or bad cable or something), it won't
 #     interfere with other people's hw_server experience
 
-def clearLock(flock):
-    syslog.syslog("Releasing lock %s" % flock)
-    try:
-        os.rmdir(flock)
-    except OSError as e:
-        syslog.syslog("Failed to release lock %s: %s" % (flock, e))
-
-#
-# Now that we know ID_SERIAL_SHORT is the udev ennvironment variable for the target
-# we can just work with THAT specific target... this is much easier than seeing who is around
-# and iterating through everyone
-#
-# Since writes are append, and line buffered, many processes can write at the config at once.
-# So if we only use the ID_SERIAL_SHORT target, then this all works fast and clean.
-#
-# Make sure that even if badly crafted udev rules fire more than once on the same
-# device, we only process the cable once
-#
-# Locking must be done with mkdir, since it is atomic
-# Beautiful from here: https://wiki.bash-hackers.org/howto/mutex
-#
-lock = "/tmp/%s" % os.environ['ID_SERIAL_SHORT']
-try:
-    # subprocess.check_output("mkdir %s" % lock, shell=True)
-    syslog.syslog("Attempting to seize lock %s" % lock)
-    os.mkdir(lock)
-except FileExistsError as e:
-    # Someone is already there!
-    syslog.syslog("Failed to seize lock %s" % lock) 
-    exit(0)
-
-syslog.syslog("Lock acquired %s" % lock)
-
 # Some default values
 address = "127.0.0.1"
 base_port = 35000
 vivado_path = None
 cable_leases = {}
 
-# Load /etc/xilinx_hotplug.conf
-with open("/etc/xilinx_hotplug.conf", "r") as f:
+# syslog.syslog(syslog.LOG_DEBUG, "hotplug called!")
+
+# Load and lock on /etc/xilinx_hotplug.conf
+with open("/etc/xilinx_hotplug.conf", "a+") as f:
+    
+    # Sweet flock() is blocking
+    # syslog.syslog("Waiting on POSIX configuration file lock")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+    except Exception as e:
+        syslog.syslog("POSIX lock on the configuration file failed: %s" % e)
+        exit(0)
+
+    # syslog.syslog("POSIX lock on configuration file acquired")
+    
+    # We parse the file after the lock is yielded, so if other cables have been
+    # recorded for the first time, we know
+            
+    # Append mode puts you at the end
+    f.seek(0)
+
     for N,line in enumerate(f):
-
+                    
         directives = line.strip().split()
-
+                
         if not directives:
             continue
-        
+                
         # Otherwise parse
         try:
             if directives[0] == '#':
@@ -84,66 +71,67 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
         clearLock(lock)
         exit(1)
 
-# Syslog debug output
-# syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
+    # Syslog debug output
+    # syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
 
-# Get a list of current hw_server cable ID's
-serviced_targets = []
-try:
-    instances = subprocess.check_output("ps aux | grep 'hw_server' | egrep -o 'filter [0-9A-F]+'", shell=True)
-    instances = instances.decode("utf-8")
+    # Get a list of current hw_server cable ID's
+    serviced_targets = []
+    try:
+        instances = subprocess.check_output("pgrep -a 'hw_server' | egrep -o 'filter [0-9A-F]+'", shell=True)
+        instances = instances.decode("utf-8")
+        
+        # Make it into a newline delimited list
+        instances = instances.strip().split("\n")
 
-    # Make it into a newline delimited list
-    instances = instances.strip().split("\n")
-
-    # Remove the filter part
-    serviced_targets = [instance.split()[1] for instance in instances]
+        # Remove the filter part
+        serviced_targets = [instance.split()[1] for instance in instances]
     
-    # Log to syslog
-    #syslog.syslog(syslog.LOG_DEBUG, "Current cables seviced: %s" % serviced_targets)
+        # Log to syslog
+        # syslog.syslog(syslog.LOG_DEBUG, "Current cables seviced: %s" % serviced_targets)
     
-except subprocess.CalledProcessError:
-    pass
+    except subprocess.CalledProcessError as e:
+        pass
+        #syslog.syslog(syslog.LOG_DEBUG, "No cables serviced" % e.output)
 
-# Define the target directly from udev
-target = os.environ['ID_SERIAL_SHORT']
+    # Define the target directly from udev
+    target = os.environ['ID_SERIAL_SHORT']
 
-if sys.argv[1] == "--remove":
-    # Iterate through the instances and prune unnecessary ones
-    if target in serviced_targets:
-        os.system("pkill -f 'filter %s'" % target)
-        syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % cable_leases[target][1])
+    if sys.argv[1] == "--remove":
+        # Iterate through the instances and prune unnecessary ones
+        if target in serviced_targets:
+            os.system("pkill -f 'filter %s'" % target)
+            syslog.syslog("Terminated unnecessary hw_server for detached cable %s" % cable_leases[target][1])
     
-if sys.argv[1] == "--add":   
-    if not target in serviced_targets:
-
-        # Spawn one
-        # First, check to see if its in the /etc/xilinx_hotplug.conf
-        port = None
-        name = None
-        if target in cable_leases:
+    if sys.argv[1] == "--add":   
+        if not target in serviced_targets:
+            # Spawn one
+            # First, check to see if its in the /etc/xilinx_hotplug.conf
+            port = None
+            name = None
+            if target in cable_leases:
                 
-            syslog.syslog("Found a lease for %s" % target)
-            
-            # Fetch the lease
-            lease = cable_leases[target]
-            port = int(lease[0])
-            name = lease[1]
-        else:
-            port = base_port + len(cable_leases)
-            name = target
+                syslog.syslog("Found a lease for %s at port %d" % (cable_leases[target][1], int(cable_leases[target][0])))
+        
+                # Fetch the lease
+                lease = cable_leases[target]
+                port = int(lease[0])
+                name = lease[1]
+            else:
+
+                # Here, we need to be careful
+                port = base_port + len(cable_leases)
+                name = target
                 
-            # It was not known, so add it
-            with open("/etc/xilinx_hotplug.conf", "a") as f:
                 print("cable_lease %s %d \"%s\"" % (target, port, name), file=f)
                 syslog.syslog("Added new JTAG cable %s at port %d" % (target, port))
                 cable_leases[target] = [port, name]
 
-        # And spawn
-        os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
-        
-        # Log human readable to syslog
-        syslog.syslog("Spawned hw_server for JTAG device %s, listening at %s:%s" % (name, address, port))
+            # And spawn
+            os.system('%s/hw_server -q -d -s tcp:%s:%d -e "set jtag-port-filter %s"' % (vivado_path, address, port, target))
+            
+            # Log human readable to syslog
+            syslog.syslog("Spawned hw_server for JTAG device %s, listening at %s:%s" % (name, address, port))
 
-# Clear the lock
-clearLock(lock)
+# Debug
+# syslog.syslog("Released POSIX configuration file lock")
+
