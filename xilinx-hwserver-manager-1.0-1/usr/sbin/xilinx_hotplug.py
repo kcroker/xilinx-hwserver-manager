@@ -14,19 +14,28 @@ import syslog
 #     interfere with other people's hw_server experience
 
 def clearLock(flock):
-    os.system("rmdir %s" % flock)
+    syslog.syslog("Releasing lock %s" % flock)
+    try:
+        os.rmdir(flock)
+    except OSError as e:
+        syslog.syslog("Failed to release lock %s: %s" % (flock, e))
 
-# Locking must be done with mkdir, since it is atomic
+# Locking m1ust be done with mkdir, since it is atomic
 # Beautiful from here: https://wiki.bash-hackers.org/howto/mutex
 # (I'm sure Python has some way to do mutexes, but its nice to know how to
 #  handle it at the POSIX portable level, even though this is not a bash script)
 lock = "/tmp/%s" % os.environ['ID_SERIAL_SHORT']
 try:
-    subprocess.check_output("mkdir %s" % lock, shell=True)
-except subprocess.CalledProcessError:
-    # The directory is already there, bail
+    # subprocess.check_output("mkdir %s" % lock, shell=True)
+    syslog.syslog("Attempting to seize lock %s" % lock)
+    os.mkdir(lock)
+except FileExistsError as e:
+    # Someone is already there!
+    syslog.syslog("Failed to seize lock %s" % lock) 
     exit(0)
-    
+
+syslog.syslog("Lock acquired %s" % lock)
+
 # Some default values
 address = "127.0.0.1"
 base_port = 35000
@@ -66,7 +75,7 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
         exit(1)
 
 # Syslog debug output
-# syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
+syslog.syslog(syslog.LOG_DEBUG, "Known leases: %s" % cable_leases)
 
 # Start an hw_server to get the available cables.
 # Notice we have to setgid because Xilinx commands are all shell wrappers which make architecture-dependent decisions
@@ -74,26 +83,30 @@ with open("/etc/xilinx_hotplug.conf", "r") as f:
 #
 # We have to exec(), so we inherit the foreground process (no -d), change its group, and then kill the entire group.
 # Ugh.
-server = subprocess.Popen(["exec %s/hw_server" % vivado_path, "-s 127.0.0.1", "-q"],
-                          preexec_fn=os.setpgrp,
-                          shell=True,
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL)
+try:
+    server = subprocess.Popen(["exec %s/hw_server" % vivado_path, "-s 127.0.0.1", "-q"],
+                              preexec_fn=os.setpgrp,
+                              shell=True,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+except Exception as e:
+    syslog.syslog("Could not determine serviced cables: %s" % e)
+    exit(0)
 
-os.system('echo "connect -host 127.0.0.1\nset logfile [open \"/tmp/hw_targets.tmp\" \"w\"]\nputs \$logfile [jtag targets]\nclose \$logfile\n" | %s/xsdb -quiet' % vivado_path)
-os.system('grep -i "Digilent" /tmp/hw_targets.tmp > /tmp/hw_targets')
-os.system("rm /tmp/hw_targets.tmp")
+os.system('echo "connect -host 127.0.0.1\nset logfile [open \"%s/hw_targets.tmp\" \"w\"]\nputs \$logfile [jtag targets]\nclose \$logfile\n" | %s/xsdb -quiet' % (lock, vivado_path))
+os.system('grep -i "Digilent" %s/hw_targets.tmp > %s/hw_targets' % (lock, lock))
+os.system("rm %s/hw_targets.tmp" % lock)
 
 # Kill all the stuff that just got spawned
 os.killpg(os.getpgid(server.pid), signal.SIGTERM)
 
 # Get whats currently recognized by vivado
 actual_targets = []
-for l in open('/tmp/hw_targets'):
+for l in open("%s/hw_targets" % lock):
     actual_targets.append(l.split()[3])
 
 # Clean up the last temp file
-os.system("rm /tmp/hw_targets")
+os.system("rm %s/hw_targets" % lock)
 
 # Get a list of current hw_server cable ID's
 serviced_targets = []
