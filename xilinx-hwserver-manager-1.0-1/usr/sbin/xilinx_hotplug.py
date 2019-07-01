@@ -14,15 +14,18 @@ import syslog
 #     interfere with other people's hw_server experience
 
 def clearLock(flock):
-    os.system("rm %s" % flock)
-  
-# Make sure we're not already trying to service this thing
+    os.system("rmdir %s" % flock)
+
+# Locking must be done with mkdir, since it is atomic
+# Beautiful from here: https://wiki.bash-hackers.org/howto/mutex
+# (I'm sure Python has some way to do mutexes, but its nice to know how to
+#  handle it at the POSIX portable level, even though this is not a bash script)
 lock = "/tmp/%s" % os.environ['ID_SERIAL_SHORT']
-if os.path.exists(lock):
+try:
+    subprocess.check_output("mkdir %s" % lock, shell=True)
+except subprocess.CalledProcessError:
+    # The directory is already there, bail
     exit(0)
-else:
-    # Create the lock
-    open(lock, 'w').close()
     
 # Some default values
 address = "127.0.0.1"

@@ -11,6 +11,5 @@ pkill hw_server
 # Update udev files
 udevadm control --reload
 
-# First run
-/usr/sbin/xilinx_hotplug.py --add
-
+# Trigger to attach current devices
+udevadm trigger --action=add --attr-match=idVendor='0403' --subsystem-match=usb
