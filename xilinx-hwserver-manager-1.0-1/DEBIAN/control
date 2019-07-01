@@ -2,7 +2,7 @@ Package: xilinx-hwserver-manager
 Version: 1.0-1
 Section: misc
 Priority: optional
-Architecture: any
+Architecture: all 
 Depends: python3, udev, grep
 Maintainer: Kevin Croker <kcroker@phys.hawaii.edu>
 Description: Spawns and kills dedicated Xilinx hw_server instances at consistent ports for distinct JTAG cables.

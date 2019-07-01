@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# Clean up udev
+udevadm control --reload
+
+# Remove any hw_servers
+pkill hw_server
+
+# Signal success 
+exit 0

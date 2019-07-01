@@ -1,0 +1,16 @@
+#!/bin/bash
+# Sets the permissions correctly and reloads udev
+
+chown root.root /usr/sbin/xilinx_hotplug.py /etc/xilinx_hotplug.conf /etc/udev/rules.d/53-xilinx-dedicated-hwservers.rules
+chmod 0744 /usr/sbin/xilinx_hotplug.py
+chmod 0644 /etc/xilinx_hotplug.conf /etc/udev/rules.d/53-xilinx-dedicated-hwservers.rules
+
+# Kill any existing hw_servers
+pkill hw_server
+
+# Update udev files
+udevadm control --reload
+
+# First run
+/usr/sbin/xilinx_hotplug.py --add
+
